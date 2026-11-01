@@ -32,7 +32,7 @@ async function chatJson(settings, system, user, timeoutMs = 45000) {
   try {
     const data = await chatJsonBackend(system, user, timeoutMs);
     return data;
-  } catch (e) {
+  } catch (_e) {
     // fall through to direct call
   }
   return withTimeout(async (signal) => {

@@ -51,7 +51,8 @@
           "microphonePermission": "InterviewAI needs your microphone to record your interview answers."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-status-bar"
     ]
   }
 }

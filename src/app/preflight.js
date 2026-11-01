@@ -1,3 +1,4 @@
+import '../polyfill';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Image, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { router } from 'expo-router';
@@ -16,12 +17,12 @@ import { evaluateNoise, evaluateVoice, computeSnr } from '../services/audioCheck
 import { analyzeFrameBase64, frameToDataUri } from '../services/imageAnalysis';
 import { evaluateMovement, evaluateVideoQuality } from '../services/visionChecks';
 import {
+  fetchLiveWebcamFrame,
   generateSimulatedFrameBase64,
   generateSimulatedNoiseSamples,
   generateSimulatedVoiceSamples,
   isSimulator,
   SCENARIOS,
-  forceSimulatorForTesting,
 } from '../services/simulatorMedia';
 import { colors, spacing, typography } from '../theme';
 
@@ -58,9 +59,11 @@ export default function PreflightScreen() {
   const [error, setError] = useState(null);
 
   // Simulator controls & testing state
-  const onSimulator = useMemo(() => { forceSimulatorForTesting(true); return true; }, []);
+  const onSimulator = useMemo(() => isSimulator(), []);
   const [simScenario, setSimScenario] = useState('PASS');
   const [showSimControls, setShowSimControls] = useState(false);
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [liveWebcamUri, setLiveWebcamUri] = useState(null);
 
   const cameraRef = useRef(null);
   const meterSamples = useRef([]);
@@ -70,6 +73,41 @@ export default function PreflightScreen() {
 
   const recorder = useAudioRecorder(REC_OPTIONS, () => {});
   const recorderState = useAudioRecorderState(recorder, 150);
+
+  // Poll Mac webcam bridge for real-time video feed in simulator
+  useEffect(() => {
+    let mounted = true;
+    let timer = null;
+
+    async function streamWebcam() {
+      if (!mounted) return;
+      if (onSimulator) {
+        try {
+          const frame = await fetchLiveWebcamFrame();
+          if (mounted && frame && frame.base64) {
+            setLiveWebcamUri(`data:image/jpeg;base64,${frame.base64}`);
+            setWebcamLive(true);
+          } else if (mounted) {
+            setWebcamLive(false);
+          }
+        } catch {
+          if (mounted) setWebcamLive(false);
+        }
+      }
+      if (mounted) {
+        timer = setTimeout(streamWebcam, 200);
+      }
+    }
+
+    if (onSimulator) {
+      streamWebcam();
+    }
+
+    return () => {
+      mounted = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [onSimulator]);
 
   // Generate live simulator frame preview URI
   const simPreviewUri = useMemo(() => {
@@ -150,12 +188,21 @@ export default function PreflightScreen() {
 
   async function captureFrame(quality, frameIndex = 0) {
     if (onSimulator) {
+      // 1. Try real Mac webcam bridge frame first
+      const live = await fetchLiveWebcamFrame();
+      if (live && live.base64) {
+        return { base64: live.base64, width: live.width, height: live.height, isLiveWebcam: true };
+      }
+      // 2. Fall back to scenario simulation
       const base64 = generateSimulatedFrameBase64(simScenario, frameIndex);
       return { base64, width: 480, height: 360 };
     }
     const ready = await waitForCameraReady();
     if (!ready || !cameraRef.current) {
-      // Graceful fallback to simulated frame if hardware camera fails
+      const live = await fetchLiveWebcamFrame();
+      if (live && live.base64) {
+        return { base64: live.base64, width: live.width, height: live.height, isLiveWebcam: true };
+      }
       const base64 = generateSimulatedFrameBase64(simScenario, frameIndex);
       return { base64, width: 480, height: 360 };
     }
@@ -166,11 +213,15 @@ export default function PreflightScreen() {
         skipProcessing: true,
       });
       if (!pic?.base64 || pic.base64.length < 500) {
+        const live = await fetchLiveWebcamFrame();
+        if (live && live.base64) return live;
         const base64 = generateSimulatedFrameBase64(simScenario, frameIndex);
         return { base64, width: 480, height: 360 };
       }
       return pic;
     } catch {
+      const live = await fetchLiveWebcamFrame();
+      if (live && live.base64) return live;
       const base64 = generateSimulatedFrameBase64(simScenario, frameIndex);
       return { base64, width: 480, height: 360 };
     }
@@ -498,8 +549,17 @@ export default function PreflightScreen() {
 
       {cameraVisible ? (
         <View style={styles.cameraWrap}>
-          {onSimulator && simPreviewUri ? (
-            <Image source={{ uri: simPreviewUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          {onSimulator ? (
+            webcamLive && liveWebcamUri ? (
+              <Image source={{ uri: liveWebcamUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+            ) : simPreviewUri ? (
+              <Image source={{ uri: simPreviewUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+            ) : (
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: '#1A2438', alignItems: 'center', justifyContent: 'center' }]}>
+                <View style={{ width: 140, height: 140, borderRadius: 70, backgroundColor: '#D4A373', marginTop: 30 }} />
+                <View style={{ width: 280, height: 140, borderTopLeftRadius: 140, borderTopRightRadius: 140, backgroundColor: '#2B3A55' }} />
+              </View>
+            )
           ) : (
             <CameraView
               ref={cameraRef}
@@ -515,11 +575,11 @@ export default function PreflightScreen() {
             <View
               style={[
                 styles.reticleBox,
-                simScenario === 'NO_FACE'
+                simScenario === 'NO_FACE' && !webcamLive
                   ? styles.reticleBoxFail
-                  : simScenario === 'COVERED'
+                  : simScenario === 'COVERED' && !webcamLive
                   ? styles.reticleBoxCovered
-                  : simScenario === 'LOW_LIGHT'
+                  : simScenario === 'LOW_LIGHT' && !webcamLive
                   ? styles.reticleBoxWarn
                   : styles.reticleBoxPass,
               ]}
@@ -529,7 +589,9 @@ export default function PreflightScreen() {
               <View style={styles.reticleCornerBL} />
               <View style={styles.reticleCornerBR} />
               <Text style={styles.reticleText}>
-                {simScenario === 'NO_FACE'
+                {webcamLive
+                  ? 'LIVE WEBCAM ACTIVE · AI MONITORING'
+                  : simScenario === 'NO_FACE'
                   ? 'NO FACE IN FRAME'
                   : simScenario === 'COVERED'
                   ? 'LENS BLOCKED'
@@ -541,9 +603,13 @@ export default function PreflightScreen() {
           </View>
 
           <View style={styles.cameraBadge}>
-            <View style={styles.liveDot} />
+            <View style={[styles.liveDot, webcamLive && { backgroundColor: '#10B981' }]} />
             <Text style={styles.cameraBadgeText}>
-              {onSimulator ? 'SIMULATOR CAMERA · AI FACE DETECTION' : 'LIVE CAMERA'}
+              {webcamLive
+                ? 'LIVE MAC WEBCAM · REAL-TIME'
+                : onSimulator
+                ? 'SIMULATOR CAMERA · AI FACE DETECTION'
+                : 'LIVE CAMERA'}
             </Text>
           </View>
         </View>
@@ -558,12 +624,23 @@ export default function PreflightScreen() {
             onPress={() => setShowSimControls((v) => !v)}
           >
             <View style={{ flex: 1 }}>
-              <Text style={styles.simTitle}>Simulator Testing Suite Active</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {webcamLive ? <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981', marginRight: 6 }} /> : null}
+                <Text style={styles.simTitle}>
+                  {webcamLive ? 'Live Mac Camera Connected' : 'Simulator Testing Suite Active'}
+                </Text>
+              </View>
               <Text style={styles.simSub}>
-                Scenario: <Text style={{ color: colors.primary, fontWeight: '700' }}>{SCENARIOS[simScenario]?.label}</Text>
+                {webcamLive ? (
+                  'Streaming real-time video from MacBook Air Camera'
+                ) : (
+                  <>
+                    Scenario: <Text style={{ color: colors.primary, fontWeight: '700' }}>{SCENARIOS[simScenario]?.label}</Text>
+                  </>
+                )}
               </Text>
             </View>
-            <StatusPill status="info" label={showSimControls ? 'HIDE' : 'CHANGE SCENARIOS'} />
+            <StatusPill status={webcamLive ? 'pass' : 'info'} label={showSimControls ? 'HIDE' : webcamLive ? 'TEST SCENARIOS' : 'CHANGE SCENARIOS'} />
           </TouchableOpacity>
 
           {showSimControls ? (
@@ -625,7 +702,7 @@ export default function PreflightScreen() {
         </Card>
       ) : null}
 
-      {effectivePhase === 'intro' ? (
+      {effectivePhase === 'intro' && !activeStep ? (
         <Card>
           <SectionTitle>Pre-interview system check</SectionTitle>
           <Text style={typography.body}>

@@ -1,5 +1,11 @@
+import '../polyfill';
+import { Buffer } from 'buffer';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
+
+// Ensure global Buffer is always available for jpeg-js and hermes
+if (typeof globalThis !== 'undefined') globalThis.Buffer = Buffer;
+if (typeof global !== 'undefined') global.Buffer = Buffer;
 
 let encodeJpeg;
 try {
@@ -46,7 +52,11 @@ export function isSimulator() {
   if (typeof Device.isDevice === 'boolean') {
     return !Device.isDevice;
   }
-  return Platform.OS === 'web';
+  if (Platform.OS === 'ios') {
+    const model = (Device.modelName || Device.modelId || '').toLowerCase();
+    if (model.includes('simulator')) return true;
+  }
+  return Platform.OS === 'web' || !Device.isDevice;
 }
 
 export function setForceSimulatorMode(enabled) {
@@ -64,28 +74,16 @@ export function setSimulatorScenario(scenario) {
 }
 
 function bytesToBase64(bytes) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let result = '';
-  const len = bytes.length;
-  let i = 0;
-  for (; i + 2 < len; i += 3) {
-    result += alphabet[bytes[i] >> 2];
-    result += alphabet[((bytes[i] & 3) << 4) | (bytes[i + 1] >> 4)];
-    result += alphabet[((bytes[i + 1] & 15) << 2) | (bytes[i + 2] >> 6)];
-    result += alphabet[bytes[i + 2] & 63];
+  const Buf = typeof Buffer !== 'undefined' ? Buffer : (typeof globalThis !== 'undefined' ? globalThis.Buffer : global.Buffer);
+  if (Buf && typeof Buf.from === 'function') {
+    return Buf.from(bytes).toString('base64');
   }
-  if (i < len) {
-    result += alphabet[bytes[i] >> 2];
-    if (i + 1 < len) {
-      result += alphabet[((bytes[i] & 3) << 4) | (bytes[i + 1] >> 4)];
-      result += alphabet[(bytes[i + 1] & 15) << 2];
-      result += '=';
-    } else {
-      result += alphabet[(bytes[i] & 3) << 4];
-      result += '==';
-    }
+  let binary = '';
+  const len = bytes.byteLength || bytes.length;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
   }
-  return result;
+  return typeof btoa !== 'undefined' ? btoa(binary) : '';
 }
 
 /**
@@ -243,3 +241,55 @@ export function forceSimulatorForTesting(force = true) {
   setForceSimulatorMode(force);
   return isSimulator();
 }
+
+/**
+ * Checks if the local Mac camera bridge is active on http://127.0.0.1:8089.
+ * When running in the iOS Simulator, this connects the host Mac's physical webcam
+ * (FaceTime HD / MacBook Air Camera) into the simulator in real time.
+ */
+export async function getMacCameraBridgeStatus() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 700);
+    const res = await fetch('http://127.0.0.1:8089/status', {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return { available: false };
+    const data = await res.json();
+    return {
+      available: data?.status === 'ok' && Boolean(data.running),
+      frameCount: data?.frameCount ?? 0,
+    };
+  } catch {
+    return { available: false };
+  }
+}
+
+/**
+ * Fetch a single live frame directly from the Mac's physical webcam via the bridge.
+ */
+export async function fetchLiveWebcamFrame() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    const res = await fetch('http://127.0.0.1:8089/frame.json', {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data?.status === 'ok' && data.base64) {
+      return {
+        base64: data.base64,
+        width: data.width || 640,
+        height: data.height || 480,
+        isLiveWebcam: true,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+

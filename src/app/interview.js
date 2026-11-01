@@ -1,3 +1,4 @@
+import '../polyfill';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import { router } from 'expo-router';
@@ -15,7 +16,7 @@ import { useAuth } from '../services/auth';
 import { getJob } from '../data/jobs';
 import { createEngine } from '../services/ai';
 import { analyzeFrameBase64, frameToDataUri } from '../services/imageAnalysis';
-import { generateSimulatedFrameBase64, isSimulator, forceSimulatorForTesting } from '../services/simulatorMedia';
+import { fetchLiveWebcamFrame, generateSimulatedFrameBase64, isSimulator } from '../services/simulatorMedia';
 import { createIntegrityMonitor } from '../services/antiCheat';
 import {
   addAnswer,
@@ -71,6 +72,7 @@ export default function InterviewScreen() {
   const [latestFlags, setLatestFlags] = useState([]);
   const [busy, setBusy] = useState(false);
   const [fatalError, setFatalError] = useState(null);
+  const [liveWebcamUri, setLiveWebcamUri] = useState(null);
 
   const engineRef = useRef(null);
   const monitorRef = useRef(null);
@@ -85,6 +87,37 @@ export default function InterviewScreen() {
 
   const recorder = useAudioRecorder(REC_OPTIONS, () => {});
   const recorderState = useAudioRecorderState(recorder, 250);
+
+  // Poll Mac webcam bridge for real-time video feed during interview in simulator
+  useEffect(() => {
+    let mounted = true;
+    let timer = null;
+    const sim = isSimulator();
+
+    async function streamWebcam() {
+      if (!mounted) return;
+      if (sim) {
+        try {
+          const frame = await fetchLiveWebcamFrame();
+          if (mounted && frame && frame.base64) {
+            setLiveWebcamUri(`data:image/jpeg;base64,${frame.base64}`);
+          }
+        } catch {}
+      }
+      if (mounted) {
+        timer = setTimeout(streamWebcam, 200);
+      }
+    }
+
+    if (sim) {
+      streamWebcam();
+    }
+
+    return () => {
+      mounted = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   const setPhaseSafe = useCallback((next) => {
     if (!mountedRef.current) return;
@@ -101,8 +134,12 @@ export default function InterviewScreen() {
     }
   }, []);
 
-  const captureFrame = useCallback(async () => { try { forceSimulatorForTesting(true); } catch(e){} const onSim = true;
+  const captureFrame = useCallback(async () => {
     if (isSimulator()) {
+      const live = await fetchLiveWebcamFrame();
+      if (live && live.base64) {
+        return analyzeFrameBase64(live.base64);
+      }
       const b64 = generateSimulatedFrameBase64('PASS');
       return analyzeFrameBase64(b64);
     }
@@ -112,6 +149,8 @@ export default function InterviewScreen() {
       if (!pic?.base64) return null;
       return analyzeFrameBase64(pic.base64);
     } catch {
+      const live = await fetchLiveWebcamFrame();
+      if (live && live.base64) return analyzeFrameBase64(live.base64);
       if (isSimulator()) {
         const b64 = generateSimulatedFrameBase64('PASS');
         return analyzeFrameBase64(b64);
@@ -150,8 +189,8 @@ export default function InterviewScreen() {
       if (!mountedRef.current) return;
       recorder.record();
       setPhaseSafe('listening');
-    } catch {
-      try { await startAnswerRecording(); return; } catch(e){} setPhaseSafe('manual');
+    } catch (_err) {
+      setPhaseSafe('manual');
     }
   }, [recorder, setPhaseSafe]);
 
@@ -290,7 +329,7 @@ export default function InterviewScreen() {
       engineRef.current = engine;
       setTotalPlanned(engine.totalPlanned);
 
-      try { forceSimulatorForTesting(true); } catch(e){} if (!camPermission?.granted && !isSimulator() && false) {
+      if (!camPermission?.granted && !isSimulator()) {
         try {
           await requestCamPermission();
         } catch {
@@ -393,11 +432,15 @@ export default function InterviewScreen() {
       {(camPermission?.granted || isSimulator()) && settings.monitoringEnabled ? (
         <View style={styles.cameraWrap}>
           {isSimulator() ? (
-            <Image
-              source={{ uri: frameToDataUri(generateSimulatedFrameBase64('PASS')) }}
-              style={StyleSheet.absoluteFill}
-              resizeMode="cover"
-            />
+            liveWebcamUri ? (
+              <Image source={{ uri: liveWebcamUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+            ) : (
+              <Image
+                source={{ uri: frameToDataUri(generateSimulatedFrameBase64('PASS')) }}
+                style={StyleSheet.absoluteFill}
+                resizeMode="cover"
+              />
+            )
           ) : (
             <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="front" mirror />
           )}

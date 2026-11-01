@@ -1,40 +1,22 @@
+import '../polyfill';
+import { Buffer } from 'buffer';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-const LOOKUP = (() => {
-  const table = new Int16Array(128).fill(-1);
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  for (let i = 0; i < alphabet.length; i++) table[alphabet.charCodeAt(i)] = i;
-  return table;
-})();
+if (typeof globalThis !== 'undefined') globalThis.Buffer = Buffer;
+if (typeof global !== 'undefined') global.Buffer = Buffer;
 
 function base64ToBytes(base64) {
-  let clean = base64.replace(/[^A-Za-z0-9+/=]/g, '');
-  let padding = 0;
-  if (clean.endsWith('==')) padding = 2;
-  else if (clean.endsWith('=')) padding = 1;
-  clean = clean.replace(/=+$/, '');
-  const outLength = Math.floor((clean.length * 3) / 4);
-  const bytes = new Uint8Array(outLength);
-  let p = 0;
-  for (let i = 0; i + 3 < clean.length; i += 4) {
-    const a = LOOKUP[clean.charCodeAt(i)];
-    const b = LOOKUP[clean.charCodeAt(i + 1)];
-    const c = LOOKUP[clean.charCodeAt(i + 2)];
-    const d = LOOKUP[clean.charCodeAt(i + 3)];
-    bytes[p++] = (a << 2) | (b >> 4);
-    if (p < outLength) bytes[p++] = ((b & 15) << 4) | (c >> 2);
-    if (p < outLength) bytes[p++] = ((c & 3) << 6) | d;
+  const Buf = typeof Buffer !== 'undefined' ? Buffer : (typeof globalThis !== 'undefined' ? globalThis.Buffer : global.Buffer);
+  if (Buf && typeof Buf.from === 'function') {
+    return Buf.from(base64, 'base64');
   }
-  if (padding === 1 && outLength > 0) {
-    const a = LOOKUP[clean.charCodeAt(clean.length - 2)];
-    const b = LOOKUP[clean.charCodeAt(clean.length - 1)];
-    bytes[outLength - 1] = ((a & 15) << 4) | (b >> 2);
-  } else if (padding === 2 && outLength > 1) {
-    const a = LOOKUP[clean.charCodeAt(clean.length - 1)];
-    bytes[outLength - 1] = a << 2;
+  const bin = atob(base64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    u8[i] = bin.charCodeAt(i);
   }
-  return bytes;
+  return u8;
 }
 
 let decodeJpeg;

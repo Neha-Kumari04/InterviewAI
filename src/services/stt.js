@@ -1,4 +1,6 @@
 import { hasApiKey } from './settings';
+import { backendFetch } from './backend';
+import { isSimulator } from './simulatorMedia';
 
 function extensionOf(uri) {
   const match = /\.([a-zA-Z0-9]+)(\?.*)?$/.exec(uri || '');
@@ -19,7 +21,16 @@ const AUDIO_TYPES = {
 };
 
 export async function transcribeAudio(fileUri, settings) {
-  if (!hasApiKey(settings)) return { ok: false, reason: 'no-key', transcript: null };
+  if (!hasApiKey(settings)) {
+    if (isSimulator()) {
+      return {
+        ok: true,
+        transcript:
+          'I have over three years of experience building cross-platform React Native and Expo applications with TypeScript, native modules, custom state management with Redux and Zustand, and automated CI/CD deployment pipelines.',
+      };
+    }
+    return { ok: false, reason: 'no-key', transcript: null };
+  }
   if (!fileUri) return { ok: false, reason: 'no-file', transcript: null };
 
   const ext = extensionOf(fileUri);
@@ -54,8 +65,6 @@ export function sttAvailable(settings) {
   return hasApiKey(settings);
 }
 
-import { backendFetch } from './backend';
-
 export async function transcribeAudioBackend(fileUri, settings) {
   try {
     const ext = (fileUri.split('.').pop().split('?')[0] || 'm4a').toLowerCase();
@@ -74,7 +83,7 @@ export async function transcribeAudioBackend(fileUri, settings) {
     const data = await res.json();
     const transcript = (data.text || '').trim();
     return { ok: true, transcript: transcript || null };
-  } catch (e) {
+  } catch (_e) {
     return { ok: false, reason: 'network', transcript: null };
   }
 }
